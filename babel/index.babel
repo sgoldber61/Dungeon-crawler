@@ -1,0 +1,1171 @@
+const BIRTH_LIMIT = 4;
+const DEATH_LIMIT = 3;
+const INITIAL_CHANCE = 0.35; // possibly adjust
+
+const ROWS = 150;
+const COLS = 300;
+const PIXEL_SIZE = 4;
+
+const DISPLAY_ENEMY_ZONES = false;
+
+class DungeonBoard {
+  constructor(rows, cols, func) {
+    this.board = new Array(rows).fill(null);
+    for (let i = 0; i < rows; i++) {
+      this.board[i] = [];
+      for (let j = 0; j < cols; j++) {
+        this.board[i].push(func(i, j));
+      }
+    }
+
+    this.rows = rows;
+    this.cols = cols;
+  }
+
+  copyDungeon() {
+    const newDungeon = new DungeonBoard(this.rows, this.cols, (i, j) => {
+      return this.board[i][j];
+    });
+  }
+
+
+  static generateDungeon() {
+    const initialTime = performance.now();
+
+    const dungeon = (new DungeonBoard(ROWS, COLS, () => (Math.random() < INITIAL_CHANCE))).fixedPoint().removeInaccessibleLand().removeInteriorHoles();
+
+    const elapsedTime = performance.now() - initialTime;
+    console.log("dungeon milliseconds ellapsed: " + elapsedTime);
+
+    return dungeon;
+  }
+
+  // automaton generation functions
+
+  tallyNeighbors(i, j) {
+    let total = 0;
+
+    for (let I = i - 1; I <= i + 1; I++) {
+      for (let J = j - 1; J <= j + 1; J++) {
+        if (I < 0 || J < 0 || I == this.rows || J == this.cols)
+          total++;
+        else
+          total += this.board[I][J];
+      }
+    }
+
+    return total - this.board[i][j];
+  }
+
+  advanceStep() {
+    let fixedPointQ = true;
+
+    if (this.board2 === undefined) 
+      this.board2 = (new Array(this.rows)).fill(0).map(() => (new Array(this.cols)).fill(0));
+
+    for (let i = 0; i < this.rows; i++) {
+      for (let j = 0; j < this.cols; j++) {
+        const neighbors = this.tallyNeighbors(i, j);
+        if (this.board[i][j]) {
+          if (neighbors < DEATH_LIMIT) {
+            this.board2[i][j] = 0;
+            fixedPointQ = false;
+          }
+          else {
+            this.board2[i][j] = this.board[i][j];
+          }
+        }
+        else {
+          if (neighbors > BIRTH_LIMIT) {
+            this.board2[i][j] = 1;
+            fixedPointQ = false;
+          }
+          else {
+            this.board2[i][j] = this.board[i][j];
+          }
+        }
+      }
+    }
+
+    [this.board, this.board2] = [this.board2, this.board];
+    return fixedPointQ
+  }
+
+  fixedPoint() {
+    for (let i = 0; i < 30; i++) { // max 30 steps to find fixed point.
+      if (this.advanceStep()) {
+        break;
+      }
+    }
+
+    // "reverse" board so that 1 represents available and 0 represents unavailable
+    for (let i = 0; i < this.rows; i++) {
+      for (let j = 0; j < this.cols; j++) {
+        this.board[i][j] = (this.board[i][j] ? 0 : 1);
+      }
+    }
+    // delete this.board2
+    this.board2 = undefined;
+
+    return this;
+  }
+
+  // dungeon trimming and flood fill functions
+
+  // total points with value "color".
+  totalColorPoints(color) {
+    let total = 0;
+    for (let i = 0; i < this.rows; i++)
+      for (let j = 0; j < this.cols; j++)
+        total += (this.board[i][j] == color ? 1 : 0);
+
+    return total;
+  }
+
+  // returns an array of coordinates representing everything that's being flooded, as well as a total number of filled points
+  // "color" represents the color we are looking to fill. If we are looking for plain ground, use 0. If we are looking for unavailable blockades, use 1.
+  floodFill(startI, startJ, color) {
+    // this is a list of painted coordinates
+    const coordinates = [];
+    // this is a queue for the algorithm
+    const queue = [[startI, startJ]];
+    let index = 0; // starting index of queue
+
+    // go through the flood coordinates, tacking on new points to coordinates.
+    const totalPoints = this.rows * this.cols;
+    for (let protectIndex = 0; protectIndex < totalPoints; protectIndex++) {
+      // if we're at the end of the array-queue, we're finished.
+      if (index == queue.length)
+        break;
+
+      // if already flooded, move on.
+      const I = queue[index][0], J = queue[index][1];
+      if (this.board[I][J] == -1) {
+        index++;
+        continue;
+      }
+
+      // set initial point to be flooded
+      this.board[I][J] = -1;
+      coordinates.push([I, J]);
+
+      // expand north and south, filling out nodes between north and south
+      let n = I, s = I;
+      while (n > 0) {
+        if (this.board[n - 1][J] == color) {
+          this.board[n - 1][J] = -1;
+          coordinates.push([n - 1, J]);
+        }
+        else
+          break;
+
+        n--;
+      }
+      while (s < this.rows - 1) {
+        if (this.board[s + 1][J] == color) {
+          this.board[s + 1][J] = -1;
+          coordinates.push([s + 1, J]);
+        }
+        else
+          break;
+
+        s++;
+      }
+
+      // add nodes to the left and right to the end of the array-queue if necessary.
+      for (let i = n; i <= s; i++) {
+        if (J > 0 && this.board[i][J - 1] == color) {
+          queue.push([i, J - 1]);
+        }
+        if (J < this.cols - 1 && this.board[i][J + 1] == color) {
+          queue.push([i, J + 1]);
+        }
+      }
+
+      // move on to the next part of the queue
+      index++;
+    }
+
+    return coordinates;
+  }
+
+  // remove either inaccessible land areas or interior holes (depending on color 1 or 0), returning a dungeon
+  // color: 1 or 0. threshold: a function of land-mass size and totalColor i.e. (size, totalColor) => (size < thresholdConstant or size < totalColor / 2).
+  removeColors(color, minThreshold, maxThreshold, maximumIter) {
+    const oppositeColor = (color == 1 ? 0 : 1);
+
+    let floodI = 0, floodJ = -1;
+
+    // only iterate at a maximum number
+    for (let protectIndex = 0; protectIndex < maximumIter; protectIndex++) {
+      // total color spaces
+      const totalColor = this.totalColorPoints(color);
+
+      // update the starting point to flood-fill
+      floodJ++;
+      if (floodJ == this.cols) {
+        if (floodI == this.rows - 1) {
+          return this;
+        }
+        else {
+          floodJ = 0;
+          floodI++;
+        }
+      }
+
+      let floodPointFound = false;
+      let i = floodI, j = floodJ;
+      while (i < this.rows) {
+        if (j == this.cols) {
+          j = 0;
+          i++;
+        }
+
+        if (this.board[i][j] == color) {
+          floodI = i;
+          floodJ = j;
+          // "break"
+          floodPointFound = true;
+          break;
+        }
+
+        j++;
+      }
+      if (!floodPointFound)
+        return this;
+
+      // flood fill
+      const floodCoordinates = this.floodFill(floodI, floodJ, color);
+
+      // if no "cut out" needed, just return the board
+      if (floodCoordinates.length == totalColor) {
+        return this;
+      }
+      // if flood is small to within the minThreshold, remove. this is the only case where we need to try another flooding.
+      if (minThreshold(floodCoordinates.length, totalColor)) {
+        for (let i = 0; i < floodCoordinates.length; i++) {
+          this.board[floodCoordinates[i][0]][floodCoordinates[i][1]] = oppositeColor; // removal means setting to opposite color
+        }
+      }
+      // flood is large by above a maxThreshold
+      else if (maxThreshold(floodCoordinates.length, totalColor)) {
+        // set opposite entire board
+        for (let i = 0; i < this.rows; i++) {
+          for (let j = 0; j < this.cols; j++) {
+            this.board[i][j] = oppositeColor;
+          }
+        }
+
+        // make flood colored
+        for (let i = 0; i < floodCoordinates.length; i++) {
+          this.board[floodCoordinates[i][0]][floodCoordinates[i][1]] = color;
+        }
+
+        return this;
+      }
+    }
+
+    return this;
+  }
+
+  healBoard(color) {
+    for (let i = 0; i < this.rows; i++) {
+      for (let j = 0; j < this.cols; j++) {
+        if (this.board[i][j] == -1)
+          this.board[i][j] = color;
+      }
+    }
+
+    return this;
+  }
+
+  removeInaccessibleLand() {
+    return this.removeColors(1, (size, totalColor) => (size < totalColor / 2), (size, totalColor) => (size >= totalColor / 2), 5).healBoard(1);
+  }
+
+  removeInteriorHoles() {
+    return this.removeColors(0, (size, totalColor) => (size <= 16), (size, totalColor) => false, this.rows * this.cols).healBoard(0);
+  }
+}
+
+// player/item/enemy initialization, and player stats code
+
+class ItemProperty {
+  constructor() {
+    // random index: either a weapon or a health
+    if (Math.random() > 0.5) {
+      Object.assign(this, ItemProperty.healthItemsData[Math.floor(Math.random() * ItemProperty.healthItemsData.length)]);
+    }
+    else {
+      Object.assign(this, ItemProperty.weaponItemsData[Math.floor(Math.random() * ItemProperty.weaponItemsData.length)]);
+    }
+  }
+}
+
+ItemProperty.healthItemsData = [{name: "Red Potion", healthValue: 20}, {name: "Green Potion", healthValue: 40}, {name: "Blue Potion", healthValue: 60}];
+ItemProperty.healthItemsData = ItemProperty.healthItemsData.map((healthItem) => {return Object.assign(healthItem, {type: "health"});});
+ItemProperty.weaponItemsData = ["Iron Shortsword", "Iron Longsword", "Steel Shortsword", "Steel Longsword", "Platinum Shortsword", "Platinum Longsword"];
+ItemProperty.weaponItemsData = ItemProperty.weaponItemsData.map((weaponItem, index) => {return {name: weaponItem, weaponLevel: index, type: "weapon"};});
+
+
+class EnemyProperty {
+  constructor() {
+    // random index: dictates what kind of enemy
+    let index;
+    const random = Math.random();
+    if (random < 0.5)
+      index = 0;
+    else if (random < 0.75)
+      index = 1;
+    else if (random < 0.9)
+      index = 2;
+    else
+      index = 3;
+
+    Object.assign(this, EnemyProperty.enemyData[index]);
+  }
+}
+
+EnemyProperty.enemyData = [["Basic Enemy", 300, 10, 8000], ["Standard Enemy", 450, 15, 12000], ["Advanced Enemy", 600, 20, 17000], ["Expert Enemy", 750, 25, 23000]].map((dataArray) => {return {name: dataArray[0], health: dataArray[1], attack: dataArray[2], experience: dataArray[3]};});
+
+
+class PlayerStatsData {
+  constructor() {
+    this.level = 1;
+    this.maxHealth = this.evaluateMaxHealth();
+    this.weapon = ItemProperty.weaponItemsData[0];
+
+    this.health = this.maxHealth;
+    this.experience = 0;
+    this.experienceToLevel = this.evaluateExperienceToLevel();
+
+    this.attack = this.evaluateAttack();
+    this.recentMessage = "";
+  }
+
+  evaluateMaxHealth() {
+    return 100 + 30 * (this.level - 1);
+  }
+
+  evaluateExperienceToLevel() {
+    return 10000 + 3000 * (this.level);
+  }
+
+  collectHealth(itemProperty) {
+    this.health += itemProperty.healthValue;
+    if (this.health > this.maxHealth) {
+      this.health = this.maxHealth;
+    }
+
+    this.recentMessage = "Health obtained: " + itemProperty.name;
+  }
+
+  collectWeapon(itemProperty) {
+    if (itemProperty.weaponLevel > this.weapon.weaponLevel) {
+      this.weapon = itemProperty;
+      this.attack = this.evaluateAttack();
+      this.recentMessage = "Weapon obtained: " + itemProperty.name;
+    }
+    else {
+      this.recentMessage = "Weapon obtained not better than current";
+    }
+  }
+
+  contactEnemy(enemyProperty) {
+    const result = {};
+
+    this.health -= enemyProperty.attack;
+    
+    if (this.health <= 0) {
+      result.playerDeathQ = true;
+      this.health = 0;
+    }
+    else {
+      result.playerDeathQ = false;
+    }
+    
+    enemyProperty.health -= this.attack;
+    if (enemyProperty.health <= 0 && result.playerDeathQ == false) {
+      this.recentMessage = enemyProperty.name + " defeated";
+      this.experience += enemyProperty.experience;
+      if (this.experience >= this.experienceToLevel) {
+        this.levelUp(1);
+      }
+      result.enemyDefeatedQ = true;
+    }
+    else {
+      this.recentMessage = enemyProperty.name + " health: " + enemyProperty.health;
+      result.enemyDefeatedQ = false;
+    }
+
+    return result;
+  }
+
+  levelUp(count) {
+    // level up... given that we are, in fact, leveling up.
+    // update level, maxHealth, health (depending on how much maxHealth increased), experience, experienceToLevel, and attack.
+    this.level++;
+
+    const newMaxHealth = this.evaluateMaxHealth();
+    this.health = (newMaxHealth - this.maxHealth) + this.health;
+    this.maxHealth = newMaxHealth;
+
+    this.experience = this.experience - this.experienceToLevel;
+    this.experienceToLevel = this.evaluateExperienceToLevel();
+    this.attack = this.evaluateAttack();
+
+    this.recentMessage += (count == 1 ? " Level up!" : " (x" + count + ")");
+
+    if (this.experience >= this.experienceToLevel) {
+      this.levelUp(2);
+    }
+  }
+
+  evaluateAttack() {
+    // attack power from weapon and level...
+    return 100 + 30 * (this.level - 1) + 50 * this.weapon.weaponLevel;
+  }
+
+  updatePlayerStats(itemData) {
+    // generic function for picking up an item
+    if (itemData.type == "weapon") {
+      this.collectWeapon(itemData);
+    }
+    else if (itemData.type == "health") {
+      this.collectHealth(itemData);
+    }
+  }
+}
+
+
+// enemy reachable squares class
+
+class ReachableSquares {
+  constructor(dungeon, position, radius) {
+    const initialTime = performance.now();
+
+    this.dungeon = dungeon;
+    this.centralPositionString = position[0] + " " + position[1];
+    this.radius = radius;
+
+    this.bulkSquares = new Set();
+    this.recentSquares = new Set([this.centralPositionString]);
+
+    const coordinateIncrementArray = [[-1, 0], [0, 1], [1, 0], [0, -1], [-1, 1], [1, 1], [1, -1], [-1, -1]];
+    for (let k = 0; k <= radius; k++) {
+      this.newRecentSquares = new Set();
+
+      this.recentSquares.forEach((positionString) => {
+        // set up position
+        const position = positionString.split(" ");
+        const i = parseInt(position[0], 10), j = parseInt(position[1], 10);
+
+        // we need to check up on N-E-S-W, then check diagonal directions NE-SE-SW-NW.
+        const directionApproval = [false, false, false, false];
+        for (let a = 0; a < 8; a++) {
+          if (a >= 4)
+            if (!(directionApproval[a - 4] || directionApproval[(a - 3) % 4]))
+              continue;
+
+          const I = i + coordinateIncrementArray[a][0], J = j + coordinateIncrementArray[a][1];
+          if (!(dungeon.board[I] && dungeon.board[I][J])) { // if dungeon.board[I][J] not both defined and 1, then continue
+            continue;
+          }
+          else {
+            if (a < 4)
+              directionApproval[a] = true; // we CAN move either N, E, S, or W, so approve the direction
+          }
+
+          const newPositionString = I + " " + J;
+          if (!(this.bulkSquares.has(newPositionString))) { // if this square hasn't been seen in the bulk squares, add it to newRecentSquares
+            this.newRecentSquares.add(newPositionString); // this will only add to newRecentSquares if it is a unique value
+          }
+        }
+      });
+
+      this.recentSquares.forEach(this.bulkSquares.add, this.bulkSquares);
+      this.recentSquares = this.newRecentSquares;
+    }
+
+    this.recentSquares.forEach(this.bulkSquares.add, this.bulkSquares);
+    this.radiusSquares = this.bulkSquares;
+
+    // end of constructor
+    // this.largeRadiusSquares contains the necessary data.
+
+
+    const elapsedTime = performance.now() - initialTime;
+    console.log("enemy milliseconds ellapsed: " + elapsedTime);
+  }
+}
+
+
+// enemy and enemy reachable squares
+class GameElements {
+  // this class is designed to construct:
+  // enemies, enemies.dungeon, and enemies.properties
+  // items, items.dungeon, and items.properties
+  constructor(dungeon) {
+    // set up available squares
+    const availableSquares = new Set();
+    for (let i = 0; i < dungeon.rows; i++) {
+      for (let j = 0; j < dungeon.cols; j++) {
+        if (dungeon.board[i][j]) {
+          availableSquares.add(i + " " + j);
+        }
+      }
+    }
+
+    // one by one, take a square out from random from the available squares and create an enemy
+    this.enemies = {};
+    this.enemies.dungeon = new DungeonBoard(dungeon.rows, dungeon.cols, () => 0);
+    this.enemies.properties = new Map();
+
+    const availableDungeonBoard = [];
+    dungeon.board.forEach((row) => {availableDungeonBoard.push(row.slice());});
+
+    for (let i = 0; i < 20; i++) { // number of enemies
+      // generate an enemy position
+
+      // SET -> ARRAY
+      const availableSquaresArray = Array.from(availableSquares);
+      const enemyPositionString = availableSquaresArray[Math.floor(availableSquaresArray.length * Math.random())];
+      const enemyPosition = enemyPositionString.split(" ").map((char) => parseInt(char, 10));
+
+      // generate an enemy's radius squares set
+      const radiusSquares = (new ReachableSquares(dungeon, enemyPosition, 10)).radiusSquares;
+      this.enemies.properties.set(enemyPositionString, {radiusSquares: radiusSquares, centralPosition: enemyPosition, currentPosition: enemyPosition.slice(), enemyProperty: new EnemyProperty()});
+      // set enemies.dungeon appearance
+      radiusSquares.forEach((coordinateString) => {
+        const coordinate = coordinateString.split(" ").map((char) => parseInt(char, 10));
+        this.enemies.dungeon.board[coordinate[0]][coordinate[1]] = {square: 1, centralPositionString: enemyPositionString};
+        availableDungeonBoard[coordinate[0]][coordinate[1]] = 0;
+      });
+      this.enemies.dungeon.board[enemyPosition[0]][enemyPosition[1]].square = 2;
+
+      // remove available squares, overestimating the range of influence of an enemy.
+      for (let i = enemyPosition[0] - 23; i <= enemyPosition[0] + 23; i++) {
+        for (let j = enemyPosition[1] - 23; j <= enemyPosition[1] + 23; j++) {
+          availableSquares.delete(i + " " + j);
+        }
+      }
+    }
+    
+    console.log("enemies dungeon board: " + JSON.stringify(this.enemies.dungeon.board));
+
+    // hashmap of enemy central position string keys and other values that represent states and actions of currently active enemies
+    this.enemies.activeEnemies = new Map();
+
+    // define both the items and the player
+    // set up remaining available squares as an array
+    const remainingAvailableSquares = [];
+    availableDungeonBoard.forEach((row, indexI) => {
+      row.forEach((element, indexJ) => {
+        if (element == 1)
+          remainingAvailableSquares.push([indexI, indexJ]);
+      });
+    });
+
+    // take a random sample, in order to generate items
+    const itemCount = 20;
+    const squaresSample = _.sample(remainingAvailableSquares, itemCount + 2);
+
+    // player and items.
+    this.player = {};
+    this.player.position = squaresSample[0];
+
+    this.newFloor = {};
+    this.newFloor.position = squaresSample[1];
+
+    const itemPositions = squaresSample.slice(2, itemCount + 2);
+
+    this.items = {};
+    this.items.dungeon = new DungeonBoard(dungeon.rows, dungeon.cols, () => 0);
+    itemPositions.forEach((position) => {this.items.dungeon.board[position[0]][position[1]] = 1});
+
+    this.items.properties = new Map();
+    itemPositions.forEach((position) => {
+      const key = position[0] + " " + position[1];
+      this.items.properties.set(key, new ItemProperty());
+    });
+  }
+}
+
+
+// react-konva code
+
+const {Layer, Stage, Group, Rect} = ReactKonva;
+
+/*
+
+  <Stage height={this.state.dungeon.rows * PIXEL_SIZE} width={this.state.dungeon.cols * PIXEL_SIZE}>
+    <Layer ref={this.layerRefCallback} />
+    <ItemSquares itemProperties={this.state.items.properties} />
+    <EnemySquares enemyProperties={this.state.enemies.properties} />
+    <PlayerSquare player={this.state.player} />
+  </Stage>
+
+*/
+
+class ItemSquares extends React.Component {
+  // props: itemProperties -> key-value pairs, with keys for the position and values for the item properties
+  // props: updateItemsQ
+  constructor(props) {
+    super(props);
+
+    this.rectangles = this.generateRectangles(props);
+  }
+
+  generateRectangles(newProps) {
+    const itemPositionsColors = [];
+
+    newProps.itemProperties.forEach((value, key) => {
+      itemPositionsColors.push({position: key.split(" ").map((numString) => parseInt(numString, 10)), type: value.type});
+    });
+
+    return itemPositionsColors.map((data) => {
+      console.log("item rectangle created");
+
+      return (
+        <Rect
+          x={data.position[1] * PIXEL_SIZE}
+          y={data.position[0] * PIXEL_SIZE}
+          width={PIXEL_SIZE}
+          height={PIXEL_SIZE}
+          fill={data.type == "health" ? "green" : "purple"}
+          key={data.position}
+          >
+        </Rect>
+      );
+    });
+  }
+
+  shouldComponentUpdate(nextProps, nextState) {
+    return nextProps.updateItemsQ; // if updateItemsQ is true, then update
+  }
+
+  componentWillUpdate(nextProps, nextState) {
+    this.rectangles = this.generateRectangles(nextProps);
+  }
+
+  render() {
+    return (
+      <Layer>
+        {this.rectangles}
+      </Layer>
+    );
+  }
+}
+
+
+class EnemySquare extends React.Component {
+  // props: position, updateQ
+  constructor(props) {
+    super(props);
+  }
+
+  shouldComponentUpdate() {
+    return this.props.updateQ;
+  }
+
+  render() {
+    console.log("creating enemy rectangle...");
+
+    return (
+      <Rect
+        x={this.props.position[1] * PIXEL_SIZE}
+        y={this.props.position[0] * PIXEL_SIZE}
+        width={PIXEL_SIZE}
+        height={PIXEL_SIZE}
+        fill={"red"}
+        >
+      </Rect>
+    );
+  }
+}
+
+class EnemySquares extends React.Component {
+  // props: enemyProperties -> key-value pairs, just use the keys for the position
+  // props: updateEnemiesQ
+  // props: activeEnemies
+
+  constructor(props) {
+    super(props);
+    this.rectangles = this.generateRectangles(props);
+  }
+
+  generateRectangles(newProps) {
+    const enemyPositions = [];
+
+    newProps.enemyProperties.forEach((value, key) => { // key: centralPositionString, value: includes currentPosition
+      enemyPositions.push({position: value.currentPosition, updateQ: (newProps.activeEnemies.has(key) ? true : false)});
+    });
+
+    return enemyPositions.map((data) => {
+      return (
+        <EnemySquare position={data.position} updateQ={data.updateQ} key={data.position} />
+      );
+    });
+  }
+
+  shouldComponentUpdate(nextProps, nextState) {
+    return nextProps.updateEnemiesQ;
+  }
+
+  componentWillUpdate(nextProps, nextState) {
+    this.rectangles = this.generateRectangles(nextProps);
+  }
+
+  render() {
+    return (
+      <Layer>
+        {this.rectangles}
+      </Layer>
+    );
+  }
+}
+
+const PlayerSquare = (props) => {
+  // props: player -> position as an array
+
+  return (
+    <Layer>
+      <Rect
+        x={props.player.position[1] * PIXEL_SIZE}
+        y={props.player.position[0] * PIXEL_SIZE}
+        width={PIXEL_SIZE}
+        height={PIXEL_SIZE}
+        fill={"yellow"}
+        >
+      </Rect>
+    </Layer>
+  );
+}
+
+class NewFloorSquare extends React.Component {
+  // props: newFloor -> position as an array
+  constructor(props) {
+    super(props);
+  }
+
+  shouldComponentUpdate() {
+    return false;
+  }
+
+  render() {
+    return (
+      <Layer>
+        <Rect
+          x={this.props.newFloor.position[1] * PIXEL_SIZE}
+          y={this.props.newFloor.position[0] * PIXEL_SIZE}
+          width={PIXEL_SIZE}
+          height={PIXEL_SIZE}
+          fill={"gray"}
+          >
+        </Rect>
+      </Layer>
+    );
+  }
+}
+
+class MainStage extends React.Component {
+  // props functions: updatePlayerStats, contactEnemy, moveUpFloor
+  // props number: floor
+  constructor(props) {
+    super(props);
+
+    const dungeon = DungeonBoard.generateDungeon();
+
+    // GameElements contains raw data info for the player, items, and enemies.
+    const gameElements = new GameElements(dungeon);
+
+    // AStar helper factory
+    this.aStarFactory = new AStarCalculator(dungeon);
+
+    this.layerRefCallback = this.layerRefCallback.bind(this);
+    this.movePlayer = this.movePlayer.bind(this);
+
+    this.state = {dungeon: dungeon, player: gameElements.player, items: gameElements.items, newFloor: gameElements.newFloor, enemies: gameElements.enemies, updateItemsQ: true, updateEnemiesQ: true, updateStageQ: true};
+  }
+
+  layerRefCallback(layer) {
+    // upon unoumnt
+    if (layer === null)
+      return;
+
+    // add dungeon map squares directly to Konva
+    for (let i = 0; i < this.state.dungeon.rows; i++) {
+      for (let j = 0; j < this.state.dungeon.cols; j++) {
+        const rect = new Konva.Rect({
+          x: j * PIXEL_SIZE,
+          y: i * PIXEL_SIZE,
+          width: PIXEL_SIZE,
+          height: PIXEL_SIZE,
+          fill: (this.state.dungeon.board[i][j] ? "darkblue" : "black")
+        });
+
+        layer.add(rect);
+      }
+    }
+
+    // add enemy region squares directly to Konva
+    if (DISPLAY_ENEMY_ZONES) {
+      const enemyRegions = [];
+
+      this.state.enemies.properties.forEach((value, key) => { // key: centralPositionString, value: radiusSquares set
+        enemyRegions.push({centralPositionString: key, neighborPositions: []});
+
+        value.radiusSquares.forEach((positionString) => {
+          enemyRegions[enemyRegions.length - 1].neighborPositions.push(positionString);
+        });
+      });
+
+      enemyRegions.forEach((enemyAreaData) => {
+        enemyAreaData.neighborPositions.forEach((positionString) => {
+          const position = positionString.split(" ").map((numString) => parseInt(numString, 10));
+
+          console.log("enemy zone created");
+
+          const rect = new Konva.Rect({
+            x: position[1] * PIXEL_SIZE,
+            y: position[0] * PIXEL_SIZE,
+            width: PIXEL_SIZE,
+            height: PIXEL_SIZE,
+            fill: "orange"
+          });
+
+          layer.add(rect);
+        });
+
+      });
+    }
+  }
+
+  componentDidMount() {
+    // player movement
+    window.addEventListener('keydown', this.movePlayer);
+
+    // enemy movement
+    this.timerID = setInterval(this.moveEnemies.bind(this), 1000);
+  }
+
+  componentWillUnmount() {
+    // get rid of event listener
+    window.removeEventListener('keydown', this.movePlayer);
+
+    // get rid of enemy movement
+    clearInterval(this.timerID);
+  }
+
+  movePlayer(event) {
+    console.log("key pressed");
+
+    let deltaI = 0, deltaJ = 0;
+
+    switch (event.keyCode)
+        {
+      case 37: // left arrow
+        deltaJ = -1;
+        break;
+      case 39: // right arrow
+        deltaJ = 1;
+        break;
+      case 38: // up arrow
+        deltaI = -1;
+        break;
+      case 40: // down arrow
+        deltaI = 1;
+        break;
+      default:
+        return; // don't do anything
+    }
+
+    const oldI = this.state.player.position[0];
+    const oldJ = this.state.player.position[1];
+    const newI = this.state.player.position[0] + deltaI;
+    const newJ = this.state.player.position[1] + deltaJ;
+
+    const row = this.state.dungeon.board[newI];
+    if (row && row[newJ]) { // if the position is available, move to it
+      // check for changes involving enemies. either entering or leaving an enemy territory will activate/deactivate enemies
+      const newPoint = this.state.enemies.dungeon.board[newI][newJ];
+      const newPointValue = ((typeof newPoint == "object") ? newPoint.square : newPoint);
+      const oldPoint = this.state.enemies.dungeon.board[oldI][oldJ];
+      const oldPointValue = ((typeof oldPoint == "object") ? oldPoint.square : oldPoint);
+
+      console.log(newPoint);
+      console.log(newPointValue);
+
+      if (newPointValue != oldPointValue) {
+        // if we bump into an enemy, disallow moving into the enemy
+        if (newPointValue == 2) {
+          this.setState({updateItemsQ: false, updateEnemiesQ: false});
+        }
+        // if we enter an enemy territory, activate the enemy to set sights on player
+        else if (newPointValue == 1) {
+          const centralPositionString = newPoint.centralPositionString;
+          this.state.enemies.activeEnemies.set(centralPositionString, {enemyData: this.state.enemies.properties.get(centralPositionString), playerQ: true});
+
+          this.state.player.position[0] = newI;
+          this.state.player.position[1] = newJ;
+          this.setState({player: this.state.player, updateItemsQ: false, updateEnemiesQ: false});
+        }
+        // if we leave an enemy territory, set the enemy to return back to its central position
+        else {
+          const centralPositionString = oldPoint.centralPositionString;
+          this.state.enemies.activeEnemies.set(centralPositionString, {enemyData: this.state.enemies.properties.get(centralPositionString), playerQ: false});
+
+          this.state.player.position[0] = newI;
+          this.state.player.position[1] = newJ;
+          this.setState({player: this.state.player, updateItemsQ: false, updateEnemiesQ: false});
+        }
+      }
+      // check for item
+      else if (this.state.items.dungeon.board[newI][newJ]) {
+        const itemData = this.state.items.properties.get(newI + " " + newJ);
+
+        // do stuff depending on itemData.
+        this.props.updatePlayerStats(itemData);
+
+        this.state.items.dungeon.board[newI][newJ] = 0;
+        this.state.items.properties.delete(newI + " " + newJ);
+
+        this.state.player.position[0] = newI;
+        this.state.player.position[1] = newJ;
+        this.setState({player: this.state.player, items: this.state.items, updateItemsQ: true, updateEnemiesQ: false});
+      }
+      // check for newFloor
+      else if ((this.state.newFloor.position[0] == newI) && (this.state.newFloor.position[1] == newJ)) {
+        this.props.moveUpFloor();
+      }
+      // no items, no enemy interactions or territory changes
+      else {
+        this.state.player.position[0] = newI;
+        this.state.player.position[1] = newJ;
+        this.setState({player: this.state.player, updateItemsQ: false, updateEnemiesQ: false});
+      }
+    }
+  }
+  
+  // move enemies functions
+  
+  // helper function to advance enemy
+  advanceEnemy(coord0, coord1, centralPosition) {
+    // adjust 2d dungeon array
+    this.state.enemies.dungeon.board[coord0[0]][coord0[1]] = 1;
+    this.state.enemies.dungeon.board[coord1[0]][coord1[1]] = 2;
+
+    // adjust current position in enemy data
+    const centralPositionString = centralPosition[0] + " " + centralPosition[1];
+    const enemyData = this.state.enemies.properties.get(centralPositionString);
+    enemyData.currentPosition[0] = coord1[0];
+    enemyData.currentPosition[1] = coord1[1];
+  }
+
+  moveEnemies() {
+    let enemyMovedQ = false;
+
+    this.state.enemies.activeEnemies.forEach((value, key, hashMap) => {
+      let path;
+      if (value.playerQ) { // if player is on stage, generate a path
+        console.log(JSON.stringify(value.enemyData.currentPosition));
+        console.log(JSON.stringify(this.state.player.position));
+
+        path = this.aStarFactory.calculatePath(value.enemyData.currentPosition, this.state.player.position);
+      }
+
+      if (path && path.length <= 8) { // move forwards to player
+        value.pathBackwards = undefined;
+
+        // if player is one step away, do damage!
+        if (path.length == 2) {
+          const contactResults = this.props.contactEnemy(value.enemyData.enemyProperty);
+          // enemydefeatedQ, playerDeathQ
+
+          if (contactResults.playerDeathQ) {
+            this.props.playerDefeated();
+          }
+
+          if (contactResults.enemyDefeatedQ) {
+            value.enemyData.radiusSquares.forEach((positionString) => {
+              const position = positionString.split(" ").map((char) => parseInt(char, 10));
+              this.state.enemies.dungeon.board[position[0]][position[1]] = 0;
+            });
+
+            this.state.enemies.properties.delete(value.enemyData.centralPosition[0] + " " + value.enemyData.centralPosition[1]);
+
+            hashMap.delete(key);
+
+            enemyMovedQ = true;
+          }
+        }
+        // otherwise, move towards the player
+        else {
+          console.log(JSON.stringify(path[0]) + " " + JSON.stringify(path[1]));
+          this.advanceEnemy(path[0], path[1], value.enemyData.centralPosition);
+          enemyMovedQ = true;
+        }
+      }
+      else { // move backwards to centralPosition
+        console.log("moving backwards");
+        if ((value.enemyData.centralPosition[0] == value.enemyData.currentPosition[0]) && (value.enemyData.centralPosition[1] == value.enemyData.currentPosition[1])) {
+          if (!(value.playerQ)) {
+            hashMap.delete(key);
+          }
+          else {
+            value.pathBackwards = undefined;
+          }
+        }
+        else {
+          if (!(value.pathBackwards)) {
+            value.pathBackwards = this.aStarFactory.calculatePath(value.enemyData.currentPosition, value.enemyData.centralPosition);
+          }
+
+          console.log(JSON.stringify(value.pathBackwards[0]) + " " + JSON.stringify(value.pathBackwards[1]));
+          this.advanceEnemy(value.pathBackwards[0], value.pathBackwards[1], value.enemyData.centralPosition);
+          value.pathBackwards.shift();
+          enemyMovedQ = true;
+        }
+      }
+    });
+
+    if (enemyMovedQ) {
+      this.setState({enemies: this.state.enemies, updateItemsQ: false, updateEnemiesQ: true});
+    }
+  }
+
+  render() {
+    // ItemSquares, EnemySquares, and PlayerSquare are all Layers.
+    return (
+      <Stage height={this.state.dungeon.rows * PIXEL_SIZE} width={this.state.dungeon.cols * PIXEL_SIZE} key={this.props.floor}>
+        <Layer ref={this.layerRefCallback} />
+        <PlayerSquare player={this.state.player} />
+        <ItemSquares itemProperties={this.state.items.properties} updateItemsQ={this.state.updateItemsQ} />
+        <NewFloorSquare newFloor={this.state.newFloor} />
+        <EnemySquares enemyProperties={this.state.enemies.properties} updateEnemiesQ={this.state.updateEnemiesQ} activeEnemies={this.state.enemies.activeEnemies} />
+      </Stage>
+    );
+  }
+}
+
+const PlayerStats = (props) => {
+  // props: playerStats, floor, style
+  /*
+    floor
+    level
+    maxHealth
+    weapon
+    health
+    experience
+    experienceToLevel
+    attack
+    recentMessage
+  */
+
+  return (
+    <div style={props.style}>
+      <p>{"Floor " + props.floor}</p>
+      <p>{"Level " + props.playerStats.level}</p>
+      <p>{"Health " + props.playerStats.health + "/" + props.playerStats.maxHealth}</p>
+      <p>{"Experience " + props.playerStats.experience + "/" + props.playerStats.experienceToLevel}</p>
+      <p>{"Weapon " + props.playerStats.weapon.name}</p>
+      <p>{"Attack " + props.playerStats.attack}</p>
+      <p>{props.playerStats.recentMessage}</p>
+    </div>
+  );
+}
+
+class CompleteGame extends React.Component {
+  constructor(props) {
+    super(props);
+
+    const playerStats = new PlayerStatsData();
+
+    this.updatePlayerStats = this.updatePlayerStats.bind(this);
+    this.contactEnemy = this.contactEnemy.bind(this);
+    this.moveUpFloor = this.moveUpFloor.bind(this);
+    this.gameComplete = this.gameComplete.bind(this);
+    this.specialDisplay = this.specialDisplay.bind(this);
+    this.playerDefeated = this.playerDefeated.bind(this);
+    this.restartGame = this.restartGame.bind(this);
+
+    this.state = {playerStats: playerStats, floor: 1, stageDisplayQ: true};
+  }
+
+  updatePlayerStats(itemData) {
+    this.state.playerStats.updatePlayerStats(itemData);
+    this.setState({playerStats: this.state.playerStats});
+  }
+
+  contactEnemy(enemyData) {
+    const returnValue = this.state.playerStats.contactEnemy(enemyData);
+    this.setState({playerStats: this.state.playerStats});
+
+    return returnValue;
+  }
+
+  moveUpFloor() {
+    if (this.state.floor < 2) {
+      this.setState({stageDisplayQ: false}, () => {
+        this.setState({floor: this.state.floor + 1, stageDisplayQ: true});
+      });
+    }
+    else {
+      this.gameComplete();
+    }
+  }
+
+  playerDefeated() {
+    this.setState({stageDisplayQ: false}, () => {
+      this.setState({specialState: "death"});
+    });
+  }
+
+  gameComplete() {
+    this.setState({stageDisplayQ: false, specialState: "complete"});
+  }
+
+  specialDisplay() {
+    if (this.state.specialState === "death") {
+      return (
+        <div>
+          <p>{"Game Lost"}</p>
+          <button onClick={this.restartGame}>
+            {"Restart"}
+          </button>
+        </div>
+      );
+    }
+    else if (this.state.specialState === "complete") {
+      return (
+        <div>
+          <p>{"Game Complete"}</p>
+          <button onClick={this.restartGame}>
+            {"Restart"}
+          </button>
+        </div>
+      );
+    }
+  }
+  
+  restartGame() {
+    const playerStats = new PlayerStatsData();
+    this.setState({playerStats: playerStats, floor: 1, stageDisplayQ: true});
+  }
+  
+  render() {
+    console.log(this.state.stageDisplayQ);
+
+    return (
+      <div style={{position: "relative"}}>
+        {this.state.stageDisplayQ ? <MainStage updatePlayerStats={this.updatePlayerStats} contactEnemy={this.contactEnemy} moveUpFloor={this.moveUpFloor} playerDefeated={this.playerDefeated} floor={this.state.floor} /> : this.specialDisplay()}
+        <PlayerStats playerStats={this.state.playerStats} style={{position: "absolute", left: COLS * PIXEL_SIZE, top: 0}} floor={this.state.floor}>
+        </PlayerStats>
+      </div>
+    );
+  }
+}
+
+
+ReactDOM.render(<CompleteGame />, document.getElementById("main"));
+document.getElementById("main").autofocus = true;
